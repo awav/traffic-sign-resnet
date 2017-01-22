@@ -3,23 +3,23 @@ import tensorflow as tf
 import numpy as np
 
 nn_params = nt("nn_params",
-                   "learning_rate",
-                   "num_resunits",
-                   "batch_size",
-                   "num_labels",
-                   "decay_rate",
-                   "momentum_term",
-                   "depths")
+                   "learning_rate,
+                    num_resunits_per_block,
+                    batch_size,
+                    num_labels,
+                    weight_decay_rate,
+                    momentum_term,
+                    depths")
 
 class Resnet(object):
-    def __init__(self, net_batch, labels_batch, params, dtype=tf.float32, mode="eval")
+    def __init__(self, inputs_batch, labels_batch, params, mode="eval", dtype=tf.float32)
         """
         Residual Neural Network initializer.
         Args:
             inputs_batch: Input batch of images.
                           Shape: [batch_size, image_height, image_width, num_channels]
             labels_batch: Input batch of labels / classes.
-                          Shape: [batch_size, labels_count]
+                          Shape: [batch_size, num_labels]
             params:       `resnn_params`
             mode:         Either `eval` or `train`. Default: `eval`
         """
@@ -29,45 +29,46 @@ class Resnet(object):
         self._train_ops = []
         self._dtype = dtype
         self._params = params
-        ## self.inference = None
-        ## self.loss = None
-        ## self.train_op = None
+        ## self._logits = None
         ## self.learning_rate = None
         ## self.global_step = None
-        ## self.train_op = None
+        ## self.inference = None
+        ## self.loss = None
+        ## self.train = None
+        ## self.summary = None
 
     def is_training():
         return self.__mode == "train"
 
-    def graph(self):
+    def build(self):
         self.global_step = tf.contrib.framework.get_or_create_global_step()
-        self.inference()
-        self.loss()
+        self._inference()
+        self._loss()
         if is_training():
-            self.train()
-        self.summaries = tf.summary.merge_all()
+            self._train()
+        self.summary = tf.summary.merge_all()
 
-    def inference(self):
+    def _inference(self):
         #depth = self._params.depths
         depth = [16, 64, 128, 256]
         strides = [0, 1, 2, 2]
         one_stride = [1] * 4
         num_depth = len(depth)
-        num_units = self._params.num_resunits
+        num_units = self._params.num_resunits_per_block
         num_labels = self._params.num_labels
         batch_size = self._params.batch_size
-        with tf.variable_scope("init_transition"):
+        with tf.variable_scope("init"):
             net = self.inputs
             num_channels = net.get_shape()[-1]
             kernel_size = 3
-            net = self._convolution(net, kernel_size, num_channels, filters[0], one_stride)
+            net = self._convolution(net, kernel_size, num_channels, depth[0], one_stride)
         for i in xrange(1, num_depth):
-            with tf.variable_scope("unit_transition_{0}".format(i)):
+            with tf.variable_scope("resunit_transition_{0}".format(i)):
                 net = self._resunit(net, depth[i-1], depth[i], strides[i])
             for j in xrange(1, num_units):
-                with tf.variable_scope("unit_{0}_{1}".format(i, j)):
+                with tf.variable_scope("resunit_{0}_{1}".format(i, j)):
                     net = self._resunit(net, depth[i], depth[i], one_stride)
-        with tf.variable_scope("output_transition"):
+        with tf.variable_scope("output"):
             net = self._batch_norm(net)
             net = self._activate(net)
             ## Average pool
@@ -83,24 +84,22 @@ class Resnet(object):
                              "biases",
                              [num_labels],
                              initializer=tf.constant_initializer())
-            net = tf.nn.xw_plux_b(net, weights, biases)
-            self.inference = tf.nn.softmax(net)
+            self._logits = tf.nn.xw_plux_b(net, weights, biases)
+            self.inference = tf.nn.softmax(self._logits)
 
-    def loss(self):
-        decay_rate = self._params.decay_rate
+    def _loss(self):
+        weight_decay_rate = self._params.weight_decay_rate
         with tf.variable_scope("loss"):
             losses = []
             for v in tf.trainable_variables():
                 if v.op.name.find("weights") != -1:
                     losses.append(tf.nn.l2_loss(v))
-            net_entropy = tf.nn.softmax_cross_entropy_with_logits(net, self.labels)
+            net_entropy = tf.nn.softmax_cross_entropy_with_logits(self._logits, self.labels)
             self.loss = tf.reduce_mean(net_entropy, "loss")
-            self.loss += tf.mul(tf.add_n(losses), decay_rate)
+            self.loss += tf.mul(tf.add_n(losses), weight_decay_rate)
             tf.summary.scalar("loss", self.cost)
     
-    def train(self, global_step=None):
-        if global_step == None:
-            self.global_step = tf.contrib.framework.get_or_create_global_step()
+    def _train(self):
         self.learning_rate = tf.constant(self._params, dtype=self._dtype)
         tf.summary.scalar("learning rate", self.learning_rate)
         train_vars = tf.trainable_variables()
@@ -112,31 +111,31 @@ class Resnet(object):
                          global_step=self.global_step,
                          name="train_step")
         train_ops = [apply_grad] + self._train_ops
-        self.train_op = tf.group(*train_ops)
+        self.train = tf.group(*train_ops)
             
     def _resunit(self, net, fin, fout, stride):
-        res_stide = [1] * 4
+        res_stride = [1] * 4
         res_fout = fout // 4
-        fsizes = [1, 3, 1]
-        with tf.variable_scope("resunit_shortcut")
+        sizes = [1, 3, 1]
+        strides = [stride, res_stride, res_stride]
+        depth_in = [fin, res_fout, res_fout]
+        depth_out = [res_fout, res_fout, fout]
+        convs = ["conv_0_1x1", "conv_1_3x3", "conv_2_1x1"]
+        with tf.variable_scope("shortcut")
             if fin == fout:
                 shortcut = net
             else:
                 shortcut = self._convolution(net, 1, fin, fout, stride, name="conv1x1")
-        ## This is pre-activation concept appeared in arXiv:1603.05027v[1,2,3]
-        with tf.variable_scope("resunit_0"):
-            net = self._batch_norm(net, "batch_norm_0")
-            net = self._activate(net)
-            net = self._convolution(net, fsizes[0], fin, fout, stride, name="conv1x1")
-        with tf.variable_scope("resunit_1"):
-            net = self._batch_norm(net, "batch_norm_1")
-            net = self._activate(net)
-            net = self._convolution(net, fsizes[1], fin, res_fout, res_stride, name="conv3x3")
-        with tf.variable_scope("resunit_2"):
-            net = self._batch_norm(net, "batch_norm_2")
-            net = self._activate(net)
-            net = self._convolution(net, fsizes[2], fin, res_fout, res_stride, name="conv1x1")
-        with tf.variable_scope("resunit_sum"):
+        ## This is pre-activation concept which is appeared in arXiv:1603.05027v[1,2,3]
+        for i, kernel_size in enumerate(sizes):
+            with tf.variable_scope("bottleneck_{0}".format(i)):
+                net = self._batch_norm(net, name="batch_norm_{0}".format(i))
+                net = self._activate(net, name="activate_{0}".format(i))
+                net = self._convolution(
+                          net, kernel_size,
+                          depth_in[i], depth_out[i],
+                          strides[i], name=names[i])
+        with tf.variable_scope("sum"):
             net += shortcut
         return net 
 
