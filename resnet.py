@@ -104,7 +104,7 @@ def create_data_reader(
     
 def train(params):
     x_train, y_train = create_data_reader(env.train_dir)
-    rn = resnet_arch.ResNet(x_train, y_train, params, mode="train")
+    rn = resnet_arch.Resnet(x_train, y_train, params, mode="train")
     rn.build()
     with tf.variable_scope("accuracy"):
         true_predictions = tf.argmax(y_train, axis=1)
