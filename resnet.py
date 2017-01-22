@@ -1,202 +1,151 @@
 import collections.namedtuple as nt
 import tensorflow as tf
 import numpy as np
+import resnet_arch
+import pickle
+import os
 
-nn_params = nt("nn_params",
-                   "learning_rate,
-                    num_resunits_per_block,
-                    batch_size,
-                    num_labels,
-                    weight_decay_rate,
-                    momentum_term,
-                    depths")
+envconfig = nt("env_config",
+                   "train_file,
+                    test_file,
+                    save_to_dir,
+                    save_step,
+                    warmup_learning_rate,
+                    learning_steps")
 
-class Resnet(object):
-    def __init__(self, inputs_batch, labels_batch, params, mode="eval", dtype=tf.float32)
-        """
-        Residual Neural Network initializer.
-        Args:
-            inputs_batch: Input batch of images.
-                          Shape: [batch_size, image_height, image_width, num_channels]
-            labels_batch: Input batch of labels / classes.
-                          Shape: [batch_size, num_labels]
-            params:       `resnn_params`
-            mode:         Either `eval` or `train`. Default: `eval`
-        """
-        self.mode = mode
-        self.inputs = inputs_batch
-        self.labels = labels_batch
-        self._train_ops = []
-        self._dtype = dtype
-        self._params = params
-        ## self._logits = None
-        ## self.learning_rate = None
-        ## self.global_step = None
-        ## self.inference = None
-        ## self.loss = None
-        ## self.train = None
-        ## self.summary = None
+env = envconfig(
+    train_file = "./data/train.tfrecords",
+    test_file = "./data/test.tfrecords",
+    save_to_dir = "./resnet_model/",
+    save_steps = 100,
+    warmup_learning_rate = 0.01,
+    learning_steps = [
+        (400,     0.01),
+        (10000,   0.1),
+        (20000,   0.01),
+        (40000,   0.001),
+        (1000000, 0.0001)])
 
-    def is_training():
-        return self.__mode == "train"
+global_params = resnet_arch.nn_params(
+    learning_rate = 0.1,
+    num_resunits_per_block = 2,
+    batch_size = 128,
+    num_labels = 43,
+    weight_decay_rate = 0.0001,
+    momentum_term = 0.9,
+    depths = [16, 64, 128, 256],
+    image_shape = [32, 32, 3])
 
-    def build(self):
-        self.global_step = tf.contrib.framework.get_or_create_global_step()
-        self._inference()
-        self._loss()
-        if is_training():
-            self._train()
-        self.summary = tf.summary.merge_all()
+def convert_traffic_sign_data(images, labels, name, directory="."):
+    num_examples = images.shape[0]
+    assert num_examples == labels.shape[0]
+    filename = os.path.join(directory, name + ".tfrecords")
+    with tf.python_io.TFRecordWriter(filename) as w:
+        for i in xrange(num_examples):
+            image = map(int, images[i].flatten().tolist())
+            label = int(labels[i])
+            feature_img = tf.train.Feature(int64_list=tf.train.Int64List(value=image))
+            feature_lbl = tf.train.Feature(int64_list=tf.train.Int64List(value=[label]))
+            example = tf.train.Example(features=tf.train.Features(feature=
+                {"image": feature_img, "label": feature_lbl}))
+            w.write(example.SerializeToString())
 
-    def _inference(self):
-        #depth = self._params.depths
-        depth = [16, 64, 128, 256]
-        strides = [0, 1, 2, 2]
-        one_stride = [1] * 4
-        num_depth = len(depth)
-        num_units = self._params.num_resunits_per_block
-        num_labels = self._params.num_labels
-        batch_size = self._params.batch_size
-        with tf.variable_scope("init"):
-            net = self.inputs
-            num_channels = net.get_shape()[-1]
-            kernel_size = 3
-            net = self._convolution(net, kernel_size, num_channels, depth[0], one_stride)
-        for i in xrange(1, num_depth):
-            with tf.variable_scope("resunit_transition_{0}".format(i)):
-                net = self._resunit(net, depth[i-1], depth[i], strides[i])
-            for j in xrange(1, num_units):
-                with tf.variable_scope("resunit_{0}_{1}".format(i, j)):
-                    net = self._resunit(net, depth[i], depth[i], one_stride)
-        with tf.variable_scope("output"):
-            net = self._batch_norm(net)
-            net = self._activate(net)
-            ## Average pool
-            net = tf.reduce_mean(net, [1, 2], keep_dims=True, name="avg_pool")
-        with tf.variable_scope("fully_connected"):
-            net = tf.reshape(net, [batch_size, -1])
-            num_params = net.get_shape()[1]
-            weights = tf.get_variable(
-                             "weights",
-                             [num_params, num_labels],
-                             initializer=tf.uniform_unit_scaling_initializer())
-            biases = tf.get_variable(
-                             "biases",
-                             [num_labels],
-                             initializer=tf.constant_initializer())
-            self._logits = tf.nn.xw_plux_b(net, weights, biases)
-            self.inference = tf.nn.softmax(self._logits)
-
-    def _loss(self):
-        weight_decay_rate = self._params.weight_decay_rate
-        with tf.variable_scope("loss"):
-            losses = []
-            for v in tf.trainable_variables():
-                if v.op.name.find("weights") != -1:
-                    losses.append(tf.nn.l2_loss(v))
-            net_entropy = tf.nn.softmax_cross_entropy_with_logits(self._logits, self.labels)
-            self.loss = tf.reduce_mean(net_entropy, "loss")
-            self.loss += tf.mul(tf.add_n(losses), weight_decay_rate)
-            tf.summary.scalar("loss", self.cost)
+def create_data_reader(
+        directory,
+        shape=global_params.image_shape,
+        batch_size=global_params.batch_size,
+        num_labels=global_params.num_labels,
+        mode="train"):
+    file_pattern = os.path.join(directory, "*.tfrecords")
+    files = tf.gfile.Glob(file_pattern)
+    queue = tf.train.string_input_producer(files, shuffle=True)
+    reader = tf.TFRecordReader()
+    length = reduce(mul, shape)
+    _, record = reader.read(queue)
+    features = {
+        "image": tf.FixedLenFeature([length], tf.int64),
+        "label": tf.FixedLenFeature([], tf.int64)
+    }
+    example = tf.parse_single_example(record, features=features)
+    image = tf.cast(tf.reshape(examples["image"], shape), dtype=tf.float32)
+    label = tf.cast(examples["label"], dtype=tf.int32)
+    image = tf.image.per_image_standardization(image)
+    queue_shape = [shape, [1]]
+    if mode == "train":
+        num_threads = 8
+        example_queue = tf.RandomShuffleQueue(
+            capacity=num_threads*batch_size,
+            min_after_dequeue=num_threads//2,
+            dtypes=[tf.float32, tf.int32],
+            shapes=queue_shape)
+    else:
+        num_threads = 1
+        example_queue = tf.FIFOQueue(
+            capacity=num_threads*batch_size+2,
+            dtypes=[tf.float32, tf.int32],
+            shapes=queue_shape)
+    example_enqueue = example_queue.enqueue([image, label])
+    runner = tf.train.queue_runner.QueueRunner(
+        example_queue, [example_enqueue] * num_threads)
+    tf.train.add_queue_runner(runner)
+    batch_images, batch_labels = example_queue.dequeue_many(batch_size)
+    batch_labels_shape = [batch_size, 1]
+    batch_labels = tf.reshape(batch_labels, batch_labels_shape)
+    indices = tf.range(0, batch_size, 1)
+    indices = tf.reshape(indices, batch_labels_shape)
+    indices = tf.concat(1, [indices, batch_labels])
+    batch_labels = tf.sparse_to_dense(indices, [batch_size, num_labels], 1.0, 0.0)
+    if mode != "train":
+        tf.summary.image("images", batch_images)
+    return batch_images, batch_labels
     
-    def _train(self):
-        self.learning_rate = tf.constant(self._params, dtype=self._dtype)
-        tf.summary.scalar("learning rate", self.learning_rate)
-        train_vars = tf.trainable_variables()
-        grads = zip(tf.gradients(self.loss, train_vars), train_vars)
-        momentum_term = self._params.momentum_term
-        optimizer = tf.train.MomentumOptimizer(self.learning_rate, momentum_term)
-        apply_grad = optimizer.apply_gradients(
-                         grads,
-                         global_step=self.global_step,
-                         name="train_step")
-        train_ops = [apply_grad] + self._train_ops
-        self.train = tf.group(*train_ops)
-            
-    def _resunit(self, net, fin, fout, stride):
-        res_stride = [1] * 4
-        res_fout = fout // 4
-        sizes = [1, 3, 1]
-        strides = [stride, res_stride, res_stride]
-        depth_in = [fin, res_fout, res_fout]
-        depth_out = [res_fout, res_fout, fout]
-        convs = ["conv_0_1x1", "conv_1_3x3", "conv_2_1x1"]
-        with tf.variable_scope("shortcut")
-            if fin == fout:
-                shortcut = net
-            else:
-                shortcut = self._convolution(net, 1, fin, fout, stride, name="conv1x1")
-        ## This is pre-activation concept which is appeared in arXiv:1603.05027v[1,2,3]
-        for i, kernel_size in enumerate(sizes):
-            with tf.variable_scope("bottleneck_{0}".format(i)):
-                net = self._batch_norm(net, name="batch_norm_{0}".format(i))
-                net = self._activate(net, name="activate_{0}".format(i))
-                net = self._convolution(
-                          net, kernel_size,
-                          depth_in[i], depth_out[i],
-                          strides[i], name=names[i])
-        with tf.variable_scope("sum"):
-            net += shortcut
-        return net 
+def train(params):
+    if not os.path.exists(env.save_to_dir):
+        os.makedirs(env.save_to_dir)
+    x_train, y_train, x_valid, y_valid = traffic_sign_data(env.train_path)
+    rn = resnet_arch.ResNet(x_train, y_train, params, mode="train")
+    rn.build()
+    with tf.variable_scope("accuracy"):
+        true_predictions = tf.argmax(y_train, axis=1)
+        predictions = tf.argmax(rn.inference, axis=1)
+        hits = tf.cast(tf.equal(predictions, true_predictions), tf.float32)
+        accuracy = tf.reduce_mean(hits)
+        accuracy_summary = tf.summary.scalar("accuracy", accuracy)
+    class LearningRateHook(tf.train.SessionRunHook):
+        def begin(self):
+            self.learning_rate = env.warmup_learning_rate
+        def before_run(self, run_context):
+            feed_dict = {rn.learning_rate : self.learning_rate}
+            return tf.train.SessionRunArgs(rn.global_step, feed_dict=feed_dict)
+        def after_run(self, run_context, run_values):
+            curr_step = run_values.results
+            for step_change, rate  in env.learning_steps:
+                if curr_step < step_change:
+                    self.learning_rate = rate
+                    break
+    summary = tf.summary.merge([rn.summary, accuracy_summary])
+    summary_hook = tf.train.SummarySaverHook(
+                       save_steps=env.save_step,
+                       output_dir=save_to_dir,
+                       summary_op=summary)
+    logging_hook = tf.train.LoggingTensorHook(
+                       every_n_iter=env.save_step,
+                       tensors={"accuracy": accurancy,
+                                "loss":     rn.loss,
+                                "step":     rn.global_step})
+    learn_rate_hook = LearningRateHook()
+    config = tf.ConfigProto(allow_soft_placement=True)
+    with tf.train.MonitoredTrainingSession(
+                checkpoint_dir=env.save_to_dir,
+                save_checkpoint_secs=600,
+                save_summaries_steps=None,
+                hooks=[log_hook, learning_rate_hook],
+                chief_only_hooks=[summary_hook],
+                config=config)
+            as sess:
+        while not sess.shoudl_stop():
+             sess.run(rn.train)
 
-    def _batch_norm(self, net, name="batch_norm"):
-        with tf.variable_scope(name):
-            ## Input shape is [batch_size, height, width, num_kernels]
-            shape = [net.get_shape()[-1]]
-            beta = tf.get_variable("beta",
-                        shape=shape,
-                        dtype=self._dtype,
-                        initializer=tf.constant_initializer(0., dtype=self._dtype))
-            gamma = tf.get_variable("gamma",
-                        shape=shape,
-                        dtype=self._dtype,
-                        initializer=tf.constant_initializer(1., dtype=self._dtype))
-            ## Depending on mode 
-            if self.is_training():
-                avg, var = tf.nn.moments(net, [0, 1, 2], name="moments")
-                mov_avg = tf.get_variable("moving_mean",
-                              shape=shape,
-                              dtype=self._dtype,
-                              trainable=False,
-                              initializer=tf.constant_initializer(0., dtype=self._dtype))
-                mov_var = tf.get_variable("moving_var",
-                              shape=shape,
-                              dtype=self._dtype,
-                              trainable=False,
-                              initializer=tf.constant_initializer(1., dtype=self._dtype))
-                decay = 0.85
-                mov_avg_prime = tf.python.training.assign_moving_average(mov_avg, avg, decay)
-                mov_var_prime = tf.python.training.assign_moving_average(mov_var, var, decay)
-                self._train_ops.extend([mov_avg_prime, mov_var_prime])
-            else:
-                avg = tf.get_variable("moving_mean",
-                           shape=shape,
-                           dtype=self._dtype,
-                           trainable=False,
-                           initializer=tf.constant_initializer(0., dtype=self._dtype))
-                var  = tf.get_variable("moving_var",
-                           shape=shape,
-                           dtype=self._dtype,
-                           trainable=False,
-                           initializer=tf.constant_initializer(1., dtype=self._dtype))
-            epsilon = 1e-5
-            bn = tf.nn.batch_normalization(net, mean, var, beta, gamma, epsilon)
-            bn.set_shape(net.get_shape())
-            return bn
-
-    def _activate(self, net, name="relu"):
-        return tf.nn.relu(net, name=name)
-
-    def _convolution(self, net, fsize, fin, fout, stride, name="convolution"):
-        with tf.variable_scope(name):
-            num_net = fsize * fsize * fout
-            k = tf.get_variable(
-                      "weights",
-                      shape=[fsize, fsize, fin, fout],
-		      dtype=self._dtype,
-                      ## TODO: Consider Xavier initializer,
-                      ##       tf.contrib.layer.xavier_initializer
-                      initializer=tf.random_normal_initializer(stddev=np.sqrt(2.0/num_net)))
-            return tf.nn.conv2d(net, k, strides, padding="SAME")
-
-    def 
+def main(_unused_argv):
+    with tf.device("/gpu:0"):
+        train(global_params)
