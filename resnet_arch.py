@@ -1,18 +1,19 @@
-import collections.namedtuple as nt
+from collections  import namedtuple as nt
 import tensorflow as tf
 import numpy as np
 
 nn_params = nt("nn_params",
-                   "learning_rate,
-                    num_resunits_per_block,
-                    batch_size,
-                    num_labels,
-                    weight_decay_rate,
-                    momentum_term,
-                    depths")
+                   "learning_rate,"
+                   "num_resunits_per_block,"
+                   "batch_size,"
+                   "num_labels,"
+                   "weight_decay_rate,"
+                   "momentum_term,"
+                   "depths,"
+                   "image_shape")
 
 class Resnet(object):
-    def __init__(self, inputs_batch, labels_batch, params, mode="eval", dtype=tf.float32)
+    def __init__(self, inputs_batch, labels_batch, params, mode="eval", dtype=tf.float32):
         """
         Residual Neural Network initializer.
         Args:
@@ -121,7 +122,7 @@ class Resnet(object):
         depth_in = [fin, res_fout, res_fout]
         depth_out = [res_fout, res_fout, fout]
         convs = ["conv_0_1x1", "conv_1_3x3", "conv_2_1x1"]
-        with tf.variable_scope("shortcut")
+        with tf.variable_scope("shortcut"):
             if fin == fout:
                 shortcut = net
             else:
@@ -198,5 +199,3 @@ class Resnet(object):
                       ##       tf.contrib.layer.xavier_initializer
                       initializer=tf.random_normal_initializer(stddev=np.sqrt(2.0/num_net)))
             return tf.nn.conv2d(net, k, strides, padding="SAME")
-
-    def 

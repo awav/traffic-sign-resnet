@@ -13,8 +13,8 @@ IMAGE_Y_LEN = 32
 IMAGE_X_LEN = 32
 IMAGE_SHAPE = (IMAGE_Y_LEN, IMAGE_X_LEN)
 DEFAULT_SHIFT_RANGE = ((-6,6), (-6,6))
-DEFAULT_ANGLE_RANGE = (-60,45)
-DEFAULT_SCALE_RANGE = (0.6, 1.2)
+DEFAULT_ANGLE_RANGE = (-60,60)
+DEFAULT_SCALE_RANGE = (0.6, 1.4)
 INTENCITY_DISTANCE = 90
 DEFAULT_INTENSITY_RANGE = (0, 255)
 DEFAULT_SHADOW_LOW = -30
@@ -30,11 +30,11 @@ def log(*msgs):
     print(*msgs)
 
 def flip_coin():
-    return bool(random.randint(0, 2))
+    return bool(rnd.randint(0, 2))
 
-def choose(choices, random_size=False, replace=False):
+def choose(choices, random_size=False, replace=False, at_least=2):
     if random_size:
-        size = choose_int(1, len(choices))
+        size = choose_int(at_least, len(choices))
         return rnd.choice(choices, size=size, replace=replace)
     return rnd.choice(choices)
 
@@ -53,7 +53,6 @@ def clip(a, a_min=0, a_max=255):
 def choose_float(*args, size=1):
     assert(len(args) == 2)
     return rnd.uniform(low=args[0], high=args[1], size=size)
-
 
 def flipup(img):
     #log("Flipup")
@@ -114,13 +113,14 @@ def crop(img, tshape):
     crop = (tuple(wy), tuple(wx), ORIGIN)
     return ski_util.crop(img, crop_width=crop)
 
-def scale(img, range_factor=DEFAULT_SCALE_RANGE, mode=None):
+def scale(img, range_factor=DEFAULT_SCALE_RANGE, mode=None, factor=None):
     #log("Scale")
     assert(len(range_factor) == 2)
-    factor = (choose_float(*range_factor), choose_float(*range_factor))
-    if factor == (1.0, 1.0):
-        #log("Scaled augmentation failed") 
-        return img
+    if factor == None:
+        factor = (choose_float(*range_factor), choose_float(*range_factor))
+        if factor == (1.0, 1.0):
+            i, j = int(flip_coin()), int(flip_coin())
+            factor = (range_factor[i], range_factor[j])
     scaled_img = ski_trs.rescale(img, scale=factor, preserve_range=True)
     scaled_img = np.uint8(scaled_img)
     oshape = img.shape
