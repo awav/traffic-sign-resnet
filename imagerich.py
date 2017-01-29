@@ -13,7 +13,7 @@ IMAGE_Y_LEN = 32
 IMAGE_X_LEN = 32
 IMAGE_SHAPE = (IMAGE_Y_LEN, IMAGE_X_LEN)
 DEFAULT_SHIFT_RANGE = ((-6,6), (-6,6))
-DEFAULT_ANGLE_RANGE = (-60,60)
+DEFAULT_ANGLE_RANGE = (-50,50)
 DEFAULT_SCALE_RANGE = (0.6, 1.4)
 INTENCITY_DISTANCE = 90
 DEFAULT_INTENSITY_RANGE = (0, 255)
@@ -24,6 +24,7 @@ DEFAULT_Y_RANGE = (-5, 5)
 DEFAULT_MODES = ['constant', 'edge', 'symmetric', 'reflect', 'wrap']
 DEFAULT_NOIZE_MODES = ['gaussian', 'speckle']
 #DEFAULT_NOIZE_MODES = ['gaussian', 'speckle', 'poisson']
+
 ORIGIN = (0, 0)
 
 def log(*msgs):
@@ -32,9 +33,10 @@ def log(*msgs):
 def flip_coin():
     return bool(rnd.randint(0, 2))
 
-def choose(choices, random_size=False, replace=False, at_least=2):
+def choose(choices, random_size=False, replace=False, at_least=3):
     if random_size:
-        size = choose_int(at_least, len(choices))
+        min_num = at_least if len(choices) > at_least else 1
+        size = choose_int(min_num, len(choices))
         return rnd.choice(choices, size=size, replace=replace)
     return rnd.choice(choices)
 
@@ -131,27 +133,40 @@ def scale(img, range_factor=DEFAULT_SCALE_RANGE, mode=None, factor=None):
     assert(scaled_img.shape == img.shape)
     return scaled_img
 
-def shadow(img, mode=None, low=DEFAULT_SHADOW_LOW, high=DEFAULT_SHADOW_HIGH):
+def shadow(img, mode=None, max_shadow=DEFAULT_SHADOW_HIGH):
+    pass
     #log("Shadow")
-    shape = img.shape
-    sy, sx = shape[0], shape[1]
-    choose_side = lambda: choose([0, sx-1])
-    rand_x = lambda: np.clip(rnd.normal(loc=sx//2, scale=sx//4), 0, sx-1)
-    xo, xu, xb = choose_side(), rand_x(), rand_x()
-    yu, yb = 0, sy-1
-    r = np.array([yu, yu, yb, yb, yu])
-    c = np.array([xo, xu, xb, xo, xo])
-    ri, ci = ski_draw.polygon(r, c)
-    if mode == None:
-        mode = choose(['per_channel', 'all_same'])
-    size = 1
-    if mode == 'per_channel':
-        size = img.shape[2]
-    neg = choose([-1,1])
-    weight = neg * rnd.randint(low=low, high=high, size=size, dtype=np.int32)
-    img_copy = np.int32(img)
-    img_copy[ri,ci,:] += weight
-    return np.uint8(np.clip(img_copy, 0, 255))
+    #shape = img.shape
+    #sy, sx = shape[0], shape[1]
+    #choose_side = lambda: choose([0, sx-1])
+    #rand_x = lambda: np.clip(rnd.normal(loc=sx//2, scale=sx//4), 0, sx-1)
+    #xo, xu, xb = choose_side(), rand_x(), rand_x()
+    #yu, yb = 0, sy-1
+    #r = np.array([yu, yu, yb, yb, yu])
+    #c = np.array([xo, xu, xb, xo, xo])
+    #ri, ci = ski_draw.polygon(r, c)
+    #if mode == None:
+    #    mode = choose(['per_channel', 'all_same'])
+    #size = 1
+    #if mode == 'per_channel':
+    #    size = img.shape[2]
+#######
+##  #TODO
+#######
+    #img_max = np.max(img)
+    #img_min = np.min(img)
+    #gap = img_max - img_min
+    #if gap <= max_shadow:
+    #    if img_max < 2*high:
+    #        neg = 1
+    #    elif img_min > 255-2*high:
+    #        neg = -1
+    #if neg is None:
+    #    neg = choose([-1,1])
+    #weight = neg * rnd.randint(low=low, high=high, size=size, dtype=np.int32)
+    #img_copy = np.int32(img)
+    #img_copy[ri,ci,:] += weight
+    #return np.uint8(np.clip(img_copy, 0, 255))
 
 def drop(img, drop_percent=0.3):
     pass
@@ -179,19 +194,16 @@ def project(img, x_range=DEFAULT_X_RANGE, y_range=DEFAULT_Y_RANGE, mode=None):
                          mode=mode,
                          preserve_range=True)
 
-def exposure(img,
+def scale_intensity(img,
              in_range=DEFAULT_INTENSITY_RANGE,
              out_range=None,
              min_gap=INTENCITY_DISTANCE):
     #log("Exposure")
     low, high = DEFAULT_INTENSITY_RANGE
-    gap = min_gap
     ogap = np.max(img) - np.min(img)
+    gap = np.min([min_gap, ogap])
     if out_range is not None:
-        return ski_exs.rescale_intensity(
-                   img,
-                   in_range=in_range,
-                   out_range=DEFAULT_INTENSITY_RANGE)
+        return ski_exs.rescale_intensity(img, out_range=out_range)
     outl = choose_int(low, high - gap)
     outr = choose_int(outl + gap, high)
     out_range = (outl, outr)
@@ -208,6 +220,10 @@ def noise(img, mode=None):
     with_noise = ski_util.random_noise(img, mode=mode, clip=True, var=0.001)
     return ski_util.img_as_ubyte(with_noise)
 
+#DEFAULT_FUNS = [fliplr, scale_intensity, noise, shadow, scale, translate, rotate]
+DEFAULT_FUNS = [fliplr, scale_intensity, noise, scale, translate, rotate]
+DEFAULT_STR_FUNS = list(map(lambda fun: fun.__name__, DEFAULT_FUNS))
+
 class ImageRich:
      def __init__(self, seed=None, include=None, exclude=None):
          ## NOTE: Global settings
@@ -216,7 +232,7 @@ class ImageRich:
          self._funs = []
          locs = globals()
          if include == None:
-             self._funs = [fliplr, exposure, noise, shadow, scale, translate, rotate]
+             self._funs = DEFAULT_FUNS
          else:
              self._funs = self.__include(include=include)
          if exclude != None:
@@ -240,6 +256,8 @@ class ImageRich:
                  raise ValueError("Method unavailable")
              funs[i] = locs[m]
          return list(set(self._funs).union(funs))
+     def list_methods():
+         return DEFAULT_STR_FUNS
      def augment(self, img, include=None, exclude=None, random_funs=True):
          funs = self._funs
          if random_funs:

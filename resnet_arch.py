@@ -1,6 +1,8 @@
-from collections  import namedtuple as nt
 import tensorflow as tf
 import numpy as np
+
+from collections  import namedtuple as nt
+from tensorflow.python.training import moving_averages as movavg
 
 nn_params = nt("nn_params",
                    "learning_rate,"
@@ -38,22 +40,23 @@ class Resnet(object):
         ## self.train = None
         ## self.summary = None
 
-    def is_training():
-        return self.__mode == "train"
+    def is_training(self):
+        return self.mode == "train"
 
     def build(self):
         self.global_step = tf.contrib.framework.get_or_create_global_step()
         self._inference()
         self._loss()
-        if is_training():
+        if self.is_training():
             self._train()
         self.summary = tf.summary.merge_all()
 
     def _inference(self):
         #depth = self._params.depths
         depth = [16, 64, 128, 256]
-        strides = [0, 1, 2, 2]
-        one_stride = [1] * 4
+        ones = [1] * 4
+        twos = [1,2,2,1]
+        strides = [None, ones, twos, twos]
         num_depth = len(depth)
         num_units = self._params.num_resunits_per_block
         num_labels = self._params.num_labels
@@ -62,13 +65,14 @@ class Resnet(object):
             net = self.inputs
             num_channels = net.get_shape()[-1]
             kernel_size = 3
-            net = self._convolution(net, kernel_size, num_channels, depth[0], one_stride)
-        for i in xrange(1, num_depth):
+            name = "conv{0}x{0}".format(kernel_size)
+            net = self._convolution(net, kernel_size, num_channels, depth[0], ones, name=name)
+        for i in range(1, num_depth):
             with tf.variable_scope("resunit_transition_{0}".format(i)):
                 net = self._resunit(net, depth[i-1], depth[i], strides[i])
-            for j in xrange(1, num_units):
+            for j in range(1, num_units):
                 with tf.variable_scope("resunit_{0}_{1}".format(i, j)):
-                    net = self._resunit(net, depth[i], depth[i], one_stride)
+                    net = self._resunit(net, depth[i], depth[i], ones)
         with tf.variable_scope("output"):
             net = self._batch_norm(net)
             net = self._activate(net)
@@ -85,7 +89,7 @@ class Resnet(object):
                              "biases",
                              [num_labels],
                              initializer=tf.constant_initializer())
-            self._logits = tf.nn.xw_plux_b(net, weights, biases)
+            self._logits = tf.nn.xw_plus_b(net, weights, biases)
             self.inference = tf.nn.softmax(self._logits)
 
     def _loss(self):
@@ -96,13 +100,13 @@ class Resnet(object):
                 if v.op.name.find("weights") != -1:
                     losses.append(tf.nn.l2_loss(v))
             net_entropy = tf.nn.softmax_cross_entropy_with_logits(self._logits, self.labels)
-            self.loss = tf.reduce_mean(net_entropy, "loss")
+            self.loss = tf.reduce_mean(net_entropy, name="loss")
             self.loss += tf.mul(tf.add_n(losses), weight_decay_rate)
-            tf.summary.scalar("loss", self.cost)
+            tf.summary.scalar("loss", self.loss)
     
     def _train(self):
-        self.learning_rate = tf.constant(self._params, dtype=self._dtype)
-        tf.summary.scalar("learning rate", self.learning_rate)
+        self.learning_rate = tf.constant(self._params.learning_rate, dtype=self._dtype)
+        tf.summary.scalar("learning_rate", self.learning_rate)
         train_vars = tf.trainable_variables()
         grads = zip(tf.gradients(self.loss, train_vars), train_vars)
         momentum_term = self._params.momentum_term
@@ -121,7 +125,7 @@ class Resnet(object):
         strides = [stride, res_stride, res_stride]
         depth_in = [fin, res_fout, res_fout]
         depth_out = [res_fout, res_fout, fout]
-        convs = ["conv_0_1x1", "conv_1_3x3", "conv_2_1x1"]
+        names = ["conv_0_1x1", "conv_1_3x3", "conv_2_1x1"]
         with tf.variable_scope("shortcut"):
             if fin == fout:
                 shortcut = net
@@ -166,8 +170,8 @@ class Resnet(object):
                               trainable=False,
                               initializer=tf.constant_initializer(1., dtype=self._dtype))
                 decay = 0.85
-                mov_avg_prime = tf.python.training.assign_moving_average(mov_avg, avg, decay)
-                mov_var_prime = tf.python.training.assign_moving_average(mov_var, var, decay)
+                mov_avg_prime = movavg.assign_moving_average(mov_avg, avg, decay)
+                mov_var_prime = movavg.assign_moving_average(mov_var, var, decay)
                 self._train_ops.extend([mov_avg_prime, mov_var_prime])
             else:
                 avg = tf.get_variable("moving_mean",
@@ -181,7 +185,7 @@ class Resnet(object):
                            trainable=False,
                            initializer=tf.constant_initializer(1., dtype=self._dtype))
             epsilon = 1e-5
-            bn = tf.nn.batch_normalization(net, mean, var, beta, gamma, epsilon)
+            bn = tf.nn.batch_normalization(net, avg, var, beta, gamma, epsilon)
             bn.set_shape(net.get_shape())
             return bn
 
@@ -198,4 +202,4 @@ class Resnet(object):
                       ## TODO: Consider Xavier initializer,
                       ##       tf.contrib.layer.xavier_initializer
                       initializer=tf.random_normal_initializer(stddev=np.sqrt(2.0/num_net)))
-            return tf.nn.conv2d(net, k, strides, padding="SAME")
+            return tf.nn.conv2d(net, k, stride, padding="SAME")
