@@ -27,6 +27,10 @@ DEFAULT_NOIZE_MODES = ['gaussian', 'speckle']
 
 ORIGIN = (0, 0)
 
+def set_seed():
+    seed = round(time.time() * 1e6)
+    rnd.seed(seed & 0xFFFFFFFF)
+
 def log(*msgs):
     print(*msgs)
 
@@ -225,10 +229,7 @@ DEFAULT_FUNS = [fliplr, scale_intensity, noise, scale, translate, rotate]
 DEFAULT_STR_FUNS = list(map(lambda fun: fun.__name__, DEFAULT_FUNS))
 
 class ImageRich:
-     def __init__(self, seed=None, include=None, exclude=None):
-         ## NOTE: Global settings
-         seed = round(time.time() * 1e6) if seed == None else seed
-         rnd.seed(seed & 0xFFFFFFFF)
+     def __init__(self, include=None, exclude=None):
          self._funs = []
          locs = globals()
          if include == None:
