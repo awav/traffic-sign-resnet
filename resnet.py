@@ -1,6 +1,7 @@
 from collections  import namedtuple as nt
 from functools import reduce
 from operator import mul
+from sklearn.metrics import confusion_matrix as cfm
 import tensorflow as tf
 import numpy as np
 import resnet_arch
@@ -21,7 +22,7 @@ envconfig = nt("envconfig",
                    "valid_each_step,"
                    "learning_steps")
 
-env = envconfig(
+ENV = envconfig(
     train_dir = "tfdir/train/",
     valid_dir = "tfdir/valid/",
     test_dir = "tfdir/test/",
@@ -39,31 +40,33 @@ env = envconfig(
         (50000,   0.0001),
         (60000,   0.0001)])
 
-train_params = resnet_arch.nn_params(
-    learning_rate = 0.1,
-    num_resunits_per_block = 2,
-    batch_size = 128,
-    num_labels = 43,
-    weight_decay_rate = 0.0003,
-    momentum_term = 0.9,
-    depths = [16, 64, 128, 256],
-    image_shape = [32, 32, 3])
+def resnet_params(
+            learning_rate=0.1,
+            num_resunits_per_block=2,
+            batch_size=128,
+            num_labels=43,
+            weight_decay_rate=0.0003,
+            momentum_term=0.9,
+            depths=[16, 64, 128, 256],
+            image_shape=[32, 32, 3]):
+    return resnet_arch.nn_params(
+        learning_rate = learning_rate,
+        num_resunits_per_block = num_resunits_per_block,
+        batch_size = batch_size,
+        num_labels = num_labels,
+        weight_decay_rate = weight_decay_rate,
+        momentum_term = momentum_term,
+        depths = depths,
+        image_shape = image_shape)
 
-test_params = resnet_arch.nn_params(
-    num_labels = 43,
-    batch_size = 300,
-    num_resunits_per_block = 2,
-    learning_rate = 0.1,
-    weight_decay_rate = 0.0003,
-    momentum_term = 0.9,
-    depths = [16, 64, 128, 256],
-    image_shape = [32, 32, 3])
+TRAIN_PARAMS = resnet_params()
+TEST_PARAMS = resnet_params(batch_size=40)
 
 def create_data_reader(
         directory,
-        shape=train_params.image_shape,
-        batch_size=train_params.batch_size,
-        num_labels=train_params.num_labels,
+        shape=TRAIN_PARAMS.image_shape,
+        batch_size=TRAIN_PARAMS.batch_size,
+        num_labels=TRAIN_PARAMS.num_labels,
         mode="train",
         pattern="train*"):
     file_pattern = os.path.join(directory, pattern+".tfrecords")
@@ -113,14 +116,14 @@ def build_model(x, y, params, mode="train"):
     rn.build()
     return rn
 
-def evaluate(params, mode="test"):
+def evaluate(params, mode="test", confusion=False):
     if mode == "valid":
-        data_dir = env.valid_dir
-        num_batches = env.num_valid_batches
+        data_dir = ENV.valid_dir
+        num_batches = ENV.num_valid_batches
         pattern = "valid"
     elif mode == "test":
-        data_dir = env.test_dir
-        num_batches = env.num_test_batches
+        data_dir = ENV.test_dir
+        num_batches = ENV.num_test_batches
         pattern = "test"
     else:
         raise("Evaluate doesn't know passed mode")
@@ -131,36 +134,36 @@ def evaluate(params, mode="test"):
                    batch_size=params.batch_size,
                    pattern=pattern)
         rn = build_model(x, y, params, mode="eval")
-    save_to = os.path.join(env.save_to_dir, mode)
-    train_dir = os.path.join(env.save_to_dir, "train")
+    save_to = os.path.join(ENV.save_to_dir, mode)
+    model_dir = os.path.join(ENV.save_to_dir, "train")
     saver = tf.train.Saver()
     writer = tf.summary.FileWriter(save_to)
-    #best_precision = 0.0
     config = tf.ConfigProto(allow_soft_placement=True)
     sess = tf.Session(config=config)
     tf.train.start_queue_runners(sess)
     while True:
         #time.sleep(30)
-        checkpoint = tf.train.get_checkpoint_state(train_dir)
+        checkpoint = tf.train.get_checkpoint_state(model_dir)
         if not checkpoint or not checkpoint.model_checkpoint_path:
-            tf.logging.error("Model not found {0}".format(train_dir))
+            tf.logging.error("Model not found {0}".format(model_dir))
             continue
-        tf.logging.info("Start loading checkpoint at {0}".format(train_dir))
+        tf.logging.info("Start loading checkpoint at {0}".format(model_dir))
         saver.restore(sess, checkpoint.model_checkpoint_path)
         correct, total, total_loss = 0.0, 0.0, 0.0
+        cfm_pred = []
+        cfm_true = []
         for i in range(num_batches):
             run = [rn.inference, rn.labels, rn.loss, rn.global_step, rn.summary]
             pred, true, loss, step, summary = sess.run(run)
             pred = np.argmax(pred, axis=1)
             true = np.argmax(true, axis=1)
+            if confusion:
+                cfm_pred = np.append(cfm_pred, pred)
+                cfm_true = np.append(cfm_true, true)
             correct += np.sum(true == pred)
             total_loss += loss
             total += pred.shape[0]
         precision = correct / total
-        #best_precision = max(best_precision, precision)
-        #summary_best_precision = tf.Summary()
-        #summary_best_precision.value.add(tag=mode+"_best_precision", simple_value=best_precision)
-        #writer.add_summary(summary_best_precision, step)
         summary_precision = tf.Summary()
         summary_precision.value.add(tag=mode+"_precision", simple_value=precision)
         writer.add_summary(summary_precision, step)
@@ -171,13 +174,44 @@ def evaluate(params, mode="test"):
         msg = "{0}_precision: {1:.5f}, {0}_loss: {2:.5f}"
         tf.logging.info(msg.format(mode, precision, total_loss))
         writer.flush()
+        if confusion:
+            confusion_matrix = cfm(cfm_true, cfm_pred)
+            cfm_path = ENV.save_to_dir + "/confusion_matrix.p"
+            with open(cfm_path, "wb") as cfm_file:
+                pickle.dump(confusion_matrix, cfm_file)
         break
 
+def single_test(name, dataset_path, checkpoint_path, size=1):
+    params = resnet_params(batch_size=size)
+    with tf.variable_scope("train"):
+        x, y = create_data_reader(
+                     dataset_path,
+                     mode="eval",
+                     batch_size=params.batch_size,
+                     pattern=name)
+        #inputs_shape = np.append(params.batch_size, image.shape)
+        #x = tf.placeholder(dtype=tf.float32, shape=inputs_shape)
+        #y = tf.placeholder(dtype=tf.int32, shape=one_hot_label.shape)
+        rn = build_model(x, y, params, mode="eval")
+    saver = tf.train.Saver()
+    config = tf.ConfigProto(allow_soft_placement=True)
+    sess = tf.Session(config=config)
+    tf.train.start_queue_runners(sess)
+    checkpoint = tf.train.get_checkpoint_state(checkpoint_path)
+    if not checkpoint or not checkpoint.model_checkpoint_path:
+        msg = "Model is not found by passed checkpoint path {0}".format(checkpoint_path)
+        raise ValueError(msg)
+    saver.restore(sess, checkpoint.model_checkpoint_path)
+    fetches = rn.inference
+    inferences = sess.run(fetches)
+    return inferences
+    
+
 def train(params):
-    save_train_to = os.path.join(env.save_to_dir, "train")
-    #save_train_to = env.save_to_dir
-    #save_valid_to = os.path.join(env.save_to_dir, "valid")
-    x, y = create_data_reader(env.train_dir)
+    save_train_to = os.path.join(ENV.save_to_dir, "train")
+    #save_train_to = ENV.save_to_dir
+    #save_valid_to = os.path.join(ENV.save_to_dir, "valid")
+    x, y = create_data_reader(ENV.train_dir)
     with tf.variable_scope("train"):
         rn = build_model(x, y, params)
         true_predictions = tf.argmax(y, axis=1)
@@ -186,76 +220,36 @@ def train(params):
         accuracy = tf.reduce_mean(hits)
         accuracy_summary = tf.summary.scalar("accuracy", accuracy)
     #with tf.variable_scope("valid"):
-    #    x_valid, y_valid = create_data_reader(env.train_dir, mode="valid")
+    #    x_valid, y_valid = create_data_reader(ENV.train_dir, mode="valid")
     #    rn_valid = build_model(x_valid, y_valid, params, mode="eval")
     #    saver = tf.train.Saver()
     #    writer = tf.summary.FileWriter(save_valid_to)
     #    best_valid_precision = 0.0
     class LearningRateHook(tf.train.SessionRunHook):
         def begin(self):
-            self.learning_rate = env.warmup_learning_rate
+            self.learning_rate = ENV.warmup_learning_rate
         def before_run(self, run_context):
             feed_dict = {rn.learning_rate : self.learning_rate}
             return tf.train.SessionRunArgs(rn.global_step, feed_dict=feed_dict)
         def after_run(self, run_context, run_values):
             current_step = run_values.results
-            last_step, _ = env.learning_steps[-1]
+            last_step, _ = ENV.learning_steps[-1]
             if current_step > last_step:
                 run_context.request_stop()
                 return
-            for step_change, rate in env.learning_steps:
+            for step_change, rate in ENV.learning_steps:
                 if current_step < step_change:
                     if self.learning_rate != rate:
                         tf.logging.info("learning_rate: {0:.5f}".format(rate))
                     self.learning_rate = rate
                     break
-            #if curren_step != 0 && current_step % env.valid_each_step == 0:
-            #    checkpoint = tf.train.get_checkpoint_state(train_dir)
-            #    if not checkpoint or not checkpoint.model_checkpoint_path:
-            #        tf.logging.error("Model not found {0}".format(train_dir))
-            #        return
-            #    #tf.logging.info("Start loading checkpoint at {0}".format(train_dir))
-            #    saver.restore(sess, checkpoint.model_checkpoint_path)
-            #    correct, total, total_loss = 0.0, 0.0, 0.0
-            #    for i in range(env.num_valid_batches):
-            #        run = [rn.inference, rn.labels, rn.loss, rn.summary]
-            #        pred, true, loss, summary = sess.run(run)
-            #        pred = np.argmax(pred, axis=1)
-            #        true = np.argmax(true, axis=1)
-            #        correct += np.sum(true == pred)
-            #        total_loss += loss
-            #        total += pred.shape[0]
-            #    precision = correct / total
-            #    best_valid_precision = max(best_precision, precision)
-            #    summary_best_precision = tf.Summary()
-            #    summary_best_precision.value.add(
-            #        tag="valid_best_precision",
-            #        simple_value=best_precision)
-            #    writer.add_summary(summary_best_precision, current_step)
-            #    summary_precision = tf.Summary()
-            #    summary_precision.value.add(
-            #        tag="valid_precision",
-            #        simple_value=precision)
-            #    writer.add_summary(summary_precision, current_step)
-            #    summary_loss = tf.Summary()
-            #    total_loss /= env.num_valid_batches
-            #    summary_loss.value.add(tag="valid_loss",
-            #        simple_value=total_loss)
-            #    writer.add_summary(summary_loss, current_step)
-            #    msg = "{0}_loss: {1:.5f}, "
-            #          "{0}_precision: {2:.5f}, "
-            #          "{0}_best_precision: {3:.5f}, "
-            #          "{0}_loss: {4:.5f}"
-            #    tf.logging.info(msg.format("valid", loss, precision, best_precision, total_loss))
-            #    writer.flush()
-    
     summary = tf.summary.merge([rn.summary, accuracy_summary])
     summary_hook = tf.train.SummarySaverHook(
-                       save_steps=env.save_each_step,
+                       save_steps=ENV.save_each_step,
                        output_dir=save_train_to,
                        summary_op=summary)
     log_hook = tf.train.LoggingTensorHook(
-                   every_n_iter=env.save_each_step,
+                   every_n_iter=ENV.save_each_step,
                    tensors={
                        "step": rn.global_step,
                        "accuracy": accuracy,
@@ -264,7 +258,7 @@ def train(params):
     config = tf.ConfigProto(allow_soft_placement=True)
     with tf.train.MonitoredTrainingSession(
                 checkpoint_dir=save_train_to,
-                save_checkpoint_secs=env.checkpoint_sec,
+                save_checkpoint_secs=ENV.checkpoint_sec,
                 save_summaries_steps=0,
                 hooks=[log_hook, learning_rate_hook],
                 chief_only_hooks=[summary_hook],
@@ -275,8 +269,8 @@ def train(params):
 def main(mode):
     with tf.device("/gpu:0"):
         if mode == "test":
-            evaluate(test_params, mode=mode)
+            evaluate(TEST_PARAMS, mode=mode)
         elif mode == "valid":
-            evaluate(train_params, mode=mode)
+            evaluate(TRAIN_PARAMS, mode=mode)
         else:
-            train(train_params)
+            train(TRAIN_PARAMS)
